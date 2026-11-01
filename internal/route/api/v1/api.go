@@ -340,6 +340,21 @@ func RegisterRoutes(m *macaron.Macaron) {
 					})
 				}, mustEnableIssues)
 
+				m.Group("/pulls", func() {
+					m.Combo("").
+						Get(listPullRequests).
+						Post(bind(createPullRequestRequest{}), createPullRequest)
+					m.Group("/:index", func() {
+						m.Combo("").
+							Get(getPullRequest).
+							Patch(bind(editIssueRequest{}), editPullRequest)
+						m.Get("/diff", getPullRequestDiff)
+						m.Combo("/merge").
+							Get(isPullRequestMerged).
+							Put(reqRepoWriter(), bind(mergePullRequestRequest{}), mergePullRequest)
+					})
+				}, mustAllowPulls)
+
 				m.Group("/labels", func() {
 					m.Get("", listLabels)
 					m.Get("/:id", getLabel)

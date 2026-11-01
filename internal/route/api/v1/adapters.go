@@ -211,6 +211,49 @@ func toIssue(issue *database.Issue) *types.Issue {
 	return apiIssue
 }
 
+// toPullRequest converts a database pull request issue to an API pull request.
+// It assumes the issue attributes have been loaded, and the PullRequest field
+// has its BaseRepo, HeadRepo and Merger loaded.
+func toPullRequest(issue *database.Issue) *types.PullRequest {
+	pr := issue.PullRequest
+	apiIssue := toIssue(issue)
+
+	// The head repository is nil when it has been deleted.
+	headRepo := &types.Repository{Name: "deleted"}
+	if pr.HeadRepo != nil {
+		headRepo = toRepository(pr.HeadRepo, nil)
+	}
+
+	apiPR := &types.PullRequest{
+		ID:         pr.ID,
+		Index:      issue.Index,
+		Poster:     apiIssue.Poster,
+		Title:      apiIssue.Title,
+		Body:       apiIssue.Body,
+		Labels:     apiIssue.Labels,
+		Milestone:  apiIssue.Milestone,
+		Assignee:   apiIssue.Assignee,
+		State:      apiIssue.State,
+		Comments:   apiIssue.Comments,
+		HeadBranch: pr.HeadBranch,
+		HeadRepo:   headRepo,
+		BaseBranch: pr.BaseBranch,
+		BaseRepo:   toRepository(pr.BaseRepo, nil),
+		HTMLURL:    issue.HTMLURL(),
+		HasMerged:  pr.HasMerged,
+	}
+	if !pr.IsChecking() {
+		mergeable := pr.CanAutoMerge()
+		apiPR.Mergeable = &mergeable
+	}
+	if pr.HasMerged {
+		apiPR.Merged = &pr.Merged
+		apiPR.MergedCommitID = &pr.MergedCommitID
+		apiPR.MergedBy = toUser(pr.Merger)
+	}
+	return apiPR
+}
+
 func toIssueComment(c *database.Comment) *types.IssueComment {
 	return &types.IssueComment{
 		ID:      c.ID,

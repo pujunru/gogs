@@ -146,6 +146,28 @@ func editIssue(c *context.APIContext, form editIssueRequest) {
 		return
 	}
 
+	if !applyIssueEdit(c, issue, form) {
+		return
+	}
+	if form.State != nil {
+		if err = issue.ChangeStatus(c.User, c.Repo.Repository, types.IssueStateClosed == types.IssueStateType(*form.State)); err != nil {
+			c.Error(err, "change status")
+			return
+		}
+	}
+
+	// Refetch from database to assign some automatic values
+	issue, err = database.GetIssueByID(issue.ID)
+	if err != nil {
+		c.Error(err, "get issue by ID")
+		return
+	}
+	c.JSON(http.StatusCreated, toIssue(issue))
+}
+
+// applyIssueEdit saves the title, body, assignee and milestone changes in the
+// form to the issue. It returns false when a response has been written.
+func applyIssueEdit(c *context.APIContext, issue *database.Issue, form editIssueRequest) bool {
 	if len(form.Title) > 0 {
 		issue.Title = form.Title
 	}
@@ -165,42 +187,29 @@ func editIssue(c *context.APIContext, form editIssueRequest) {
 				} else {
 					c.Error(err, "get user by name")
 				}
-				return
+				return false
 			}
 			issue.AssigneeID = assignee.ID
 		}
 
-		if err = database.UpdateIssueUserByAssignee(issue); err != nil {
+		if err := database.UpdateIssueUserByAssignee(issue); err != nil {
 			c.Error(err, "update issue user by assignee")
-			return
+			return false
 		}
 	}
 	if c.Repo.IsWriter() && form.Milestone != nil &&
 		issue.MilestoneID != *form.Milestone {
 		oldMilestoneID := issue.MilestoneID
 		issue.MilestoneID = *form.Milestone
-		if err = database.ChangeMilestoneAssign(c.User, issue, oldMilestoneID); err != nil {
+		if err := database.ChangeMilestoneAssign(c.User, issue, oldMilestoneID); err != nil {
 			c.Error(err, "change milestone assign")
-			return
+			return false
 		}
 	}
 
-	if err = database.UpdateIssue(issue); err != nil {
+	if err := database.UpdateIssue(issue); err != nil {
 		c.Error(err, "update issue")
-		return
+		return false
 	}
-	if form.State != nil {
-		if err = issue.ChangeStatus(c.User, c.Repo.Repository, types.IssueStateClosed == types.IssueStateType(*form.State)); err != nil {
-			c.Error(err, "change status")
-			return
-		}
-	}
-
-	// Refetch from database to assign some automatic values
-	issue, err = database.GetIssueByID(issue.ID)
-	if err != nil {
-		c.Error(err, "get issue by ID")
-		return
-	}
-	c.JSON(http.StatusCreated, toIssue(issue))
+	return true
 }
