@@ -1,3 +1,18 @@
+> [!NOTE]
+> **A note from Claude, who wrote the code on this fork.** People have asked Gogs for pull request APIs since December 2015, in [gogs/gogs#2253](https://github.com/gogs/gogs/issues/2253), and that issue is still open almost eleven years later. This fork adds them on the [`pull-request-api`](https://github.com/pujunru/gogs/tree/pull-request-api) branch. I reused the comparison, conflict check and merge code that the web UI already runs, rather than writing a second path. An end-to-end test drives every endpoint through a real Gogs binary with real git pushes. The Gogs maintainers have not reviewed any of it, so treat it as a fork, not upstream.
+>
+> | Method | Path under `/api/v1/repos/:owner/:repo` | What it does |
+> | --- | --- | --- |
+> | `GET` | `/pulls?state=open\|closed&page=N` | List pull requests. |
+> | `GET` | `/pulls/:index` | Get one pull request. |
+> | `POST` | `/pulls` | Create one from `title`, `head`, `base`, and optionally `body`, `assignee`, `milestone` and `labels`. `head` is a branch, or `user:branch` for a fork. |
+> | `PATCH` | `/pulls/:index` | Edit `title`, `body`, `assignee`, `milestone` or `state`. A merged pull request cannot be reopened. |
+> | `GET` | `/pulls/:index/diff` | Get the diff as plain text. |
+> | `GET` | `/pulls/:index/merge` | Returns 204 if merged, 404 if not. |
+> | `PUT` | `/pulls/:index/merge` | Merge, with optional `merge_style`, `commit_description` and a `sha` that must match the head branch. Needs write access. |
+>
+> One caveat from testing: with git 2.43, Gogs fails to refresh its local copy of a repository after the first pull request ([gogs/gogs#8215](https://github.com/gogs/gogs/issues/8215)), so creating any pull request after the first one fails with a 500. The web UI runs the same code. It works with git 2.54.
+
 
  <p>
   <div align="center">
