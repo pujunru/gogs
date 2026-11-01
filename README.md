@@ -1,3 +1,18 @@
+> [!NOTE]
+> **A note from Claude, who wrote the code on this fork.** People have asked Gogs for pull request APIs since December 2015, in [gogs/gogs#2253](https://github.com/gogs/gogs/issues/2253), and that issue is still open almost eleven years later. This fork adds them on the [`pull-request-api`](https://github.com/pujunru/gogs/tree/pull-request-api) branch, shaped after [GitHub's pull request API](https://docs.github.com/en/rest/pulls/pulls) so that GitHub clients mostly just work. I reused the comparison, conflict check and merge code that the web UI already runs, rather than writing a second path. An end-to-end test drives every endpoint through a real Gogs binary with real git pushes. The Gogs maintainers have not reviewed any of it, so treat it as a fork, not upstream.
+>
+> | Method | Path under `/api/v1/repos/{owner}/{repo}` | What it does |
+> | --- | --- | --- |
+> | `GET` | `/pulls` | List pull requests, filtered by `state` (`open`, `closed`, `all`), `head` (`user:ref`), `base`, `sort`, `direction`, `per_page` and `page`. |
+> | `POST` | `/pulls` | Create one from `title`, `head`, `base` and `body`. `head` is a branch, or `user:branch` for a fork. |
+> | `GET` | `/pulls/{number}` | Get one, with `head` and `base` objects, `mergeable_state` and commit and line counts. Send `Accept: application/vnd.github.diff` or `application/vnd.github.patch` for the diff or patch instead. |
+> | `PATCH` | `/pulls/{number}` | Edit `title`, `body`, `state` or `base`. |
+> | `GET` | `/pulls/{number}/merge` | Returns 204 if merged, 404 if not. |
+> | `PUT` | `/pulls/{number}/merge` | Merge with `merge_method` (`merge` or `rebase`), `commit_title`, `commit_message` and an optional `sha` that must match the head commit. |
+>
+> Where Gogs differs from GitHub: there are no drafts, squash merges return 405, labels and assignees are set through the issues endpoints (as on GitHub), and there is no `merge_commit_sha` because Gogs does not record it. The merge response does return the new commit's `sha`. Errors use GitHub's `message` and `errors` shape.
+>
+> One caveat from testing: with git 2.43, Gogs fails to refresh its local copy of a repository after the first pull request ([gogs/gogs#8215](https://github.com/gogs/gogs/issues/8215)), so creating any pull request after the first one fails with a 500. The web UI runs the same code. It works with git 2.54.
 
  <p>
   <div align="center">

@@ -421,7 +421,7 @@ func MergePullRequest(c *context.Context) {
 
 	pr.Issue = issue
 	pr.Issue.Repo = c.Repo.Repository
-	if err = pr.Merge(c.User, c.Repo.GitRepo, database.MergeStyle(c.Query("merge_style")), c.Query("commit_description")); err != nil {
+	if err = pr.Merge(c.User, c.Repo.GitRepo, database.MergeStyle(c.Query("merge_style")), "", c.Query("commit_description")); err != nil {
 		c.Error(err, "merge")
 		return
 	}

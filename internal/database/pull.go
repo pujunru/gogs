@@ -189,9 +189,11 @@ const (
 	MergeStyleRebase  MergeStyle = "rebase_before_merging"
 )
 
-// Merge merges pull request to base repository.
+// Merge merges pull request to base repository. The commit title and description
+// are only used by MergeStyleRegular, and an empty title falls back to the
+// default "Merge branch ..." title.
 // FIXME: add repoWorkingPull make sure two merges does not happen at same time.
-func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository, mergeStyle MergeStyle, commitDescription string) (err error) {
+func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository, mergeStyle MergeStyle, commitTitle, commitDescription string) (err error) {
 	ctx := context.TODO()
 
 	defer func() {
@@ -266,11 +268,15 @@ func (pr *PullRequest) Merge(doer *User, baseGitRepo *git.Repository, mergeStyle
 			return errors.Newf("git merge --no-ff --no-commit [%s]: %v - %s", tmpBasePath, err, stderr)
 		}
 
+		if commitTitle == "" {
+			commitTitle = fmt.Sprintf("Merge branch '%s' of %s/%s into %s", pr.HeadBranch, pr.HeadUserName, pr.HeadRepo.Name, pr.BaseBranch)
+		}
+
 		// Create a merge commit for the base branch.
 		if _, stderr, err = process.ExecDir(-1, tmpBasePath,
 			fmt.Sprintf("PullRequest.Merge (git merge): %s", tmpBasePath),
 			"git", "commit", fmt.Sprintf("--author='%s <%s>'", doer.DisplayName(), doer.Email),
-			"-m", fmt.Sprintf("Merge branch '%s' of %s/%s into %s", pr.HeadBranch, pr.HeadUserName, pr.HeadRepo.Name, pr.BaseBranch),
+			"-m", commitTitle,
 			"-m", commitDescription); err != nil {
 			return errors.Newf("git commit [%s]: %v - %s", tmpBasePath, err, stderr)
 		}
@@ -549,6 +555,80 @@ func GetUnmergedPullRequestsByBaseInfo(repoID int64, branch string) ([]*PullRequ
 	return prs, x.Where("base_repo_id=? AND base_branch=? AND has_merged=? AND issue.is_closed=?",
 		repoID, branch, false, false).
 		Join("INNER", "issue", "issue.id=pull_request.issue_id").Find(&prs)
+}
+
+// PullRequestsOptions contains the filters for listing pull requests of a base
+// repository.
+type PullRequestsOptions struct {
+	BaseRepoID int64
+	// State is "open", "closed" or "all".
+	State string
+	// HeadRepoID and HeadBranch are only applied when non-zero.
+	HeadRepoID int64
+	HeadBranch string
+	BaseBranch string
+	// SortType is "created", "updated", "popularity" or "long-running".
+	SortType  string
+	Ascending bool
+	Page      int
+	PageSize  int
+}
+
+func buildPullRequestsQuery(opts PullRequestsOptions) *xorm.Session {
+	sess := x.Join("INNER", "issue", "issue.id = pull_request.issue_id").
+		Where("pull_request.base_repo_id = ?", opts.BaseRepoID)
+	switch opts.State {
+	case "closed":
+		sess.And("issue.is_closed = ?", true)
+	case "all":
+	default:
+		sess.And("issue.is_closed = ?", false)
+	}
+	if opts.HeadRepoID > 0 {
+		sess.And("pull_request.head_repo_id = ?", opts.HeadRepoID)
+	}
+	if opts.HeadBranch != "" {
+		sess.And("pull_request.head_branch = ?", opts.HeadBranch)
+	}
+	if opts.BaseBranch != "" {
+		sess.And("pull_request.base_branch = ?", opts.BaseBranch)
+	}
+	return sess
+}
+
+// PullRequests returns a page of pull requests matching the options, with their
+// issues and repositories loaded, and the total number of matches.
+func PullRequests(opts PullRequestsOptions) ([]*PullRequest, int64, error) {
+	count, err := buildPullRequestsQuery(opts).Count(new(PullRequest))
+	if err != nil {
+		return nil, 0, errors.Newf("count: %v", err)
+	}
+
+	column := "issue.created_unix"
+	switch opts.SortType {
+	case "updated":
+		column = "issue.updated_unix"
+	case "popularity":
+		column = "issue.num_comments"
+	}
+	sess := buildPullRequestsQuery(opts)
+	if opts.Ascending {
+		sess.Asc(column)
+	} else {
+		sess.Desc(column)
+	}
+	if opts.Page < 1 {
+		opts.Page = 1
+	}
+
+	prs := make([]*PullRequest, 0, opts.PageSize)
+	if err = sess.Asc("pull_request.id").Limit(opts.PageSize, (opts.Page-1)*opts.PageSize).Find(&prs); err != nil {
+		return nil, 0, errors.Newf("find: %v", err)
+	}
+	if err = PullRequestList(prs).LoadAttributes(); err != nil {
+		return nil, 0, errors.Newf("load attributes: %v", err)
+	}
+	return prs, count, nil
 }
 
 var _ errx.NotFound = (*ErrPullRequestNotExist)(nil)
