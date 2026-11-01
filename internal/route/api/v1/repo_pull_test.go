@@ -57,35 +57,35 @@ func TestPullRequests(t *testing.T) {
 	srv.commitFile(t, work, "second", "second.txt", "hello from second\n")
 	srv.commitFile(t, work, "conflict", "README.md", "changed on conflict\n")
 	srv.commitFile(t, work, "master", "README.md", "changed on master\n")
+	revParse := func(rev string) string {
+		return strings.TrimSpace(srv.git(t, work, "rev-parse", rev))
+	}
 
 	t.Run("list is empty before any pull request", func(t *testing.T) {
-		var prs []*types.PullRequest
+		var prs []*pullRequest
 		alice.getJSON("/repos/alice/demo/pulls", &prs)
 		assert.Empty(t, prs)
 	})
 
-	t.Run("create rejects invalid branches", func(t *testing.T) {
+	t.Run("create rejects invalid fields", func(t *testing.T) {
 		tests := []struct {
 			name    string
-			head    string
-			base    string
+			body    map[string]any
+			field   string
 			message string
 		}{
-			{name: "missing base", head: "feature", base: "nope", message: "base branch does not exist"},
-			{name: "missing head", head: "nope", base: "master", message: "head branch does not exist"},
-			{name: "same branch", head: "master", base: "master", message: "must be different"},
-			{name: "no commits", head: "same", base: "master", message: "no commits between"},
-			{name: "head user without fork", head: "bob:feature", base: "master", message: "does not have a fork"},
+			{name: "missing base", body: map[string]any{"head": "feature", "base": "nope"}, field: "base", message: `Base branch "nope" does not exist`},
+			{name: "missing head", body: map[string]any{"head": "nope", "base": "master"}, field: "head", message: `Head branch "nope" does not exist`},
+			{name: "same branch", body: map[string]any{"head": "master", "base": "master"}, field: "head", message: "must be different"},
+			{name: "no commits", body: map[string]any{"head": "same", "base": "master"}, field: "head", message: "No commits between master and same"},
+			{name: "head user without fork", body: map[string]any{"head": "bob:feature", "base": "master"}, field: "head", message: "bob does not have a fork"},
+			{name: "draft", body: map[string]any{"head": "feature", "base": "master", "draft": true}, field: "draft", message: "not supported"},
 		}
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				resp := alice.do(http.MethodPost, "/repos/alice/demo/pulls", map[string]any{
-					"title": "Invalid",
-					"head":  test.head,
-					"base":  test.base,
-				})
-				assert.Equal(t, http.StatusUnprocessableEntity, resp.status, resp.body)
-				assert.Contains(t, resp.body, test.message)
+				test.body["title"] = "Invalid"
+				resp := alice.do(http.MethodPost, "/repos/alice/demo/pulls", test.body)
+				resp.assertValidationFailed(test.field, test.message)
 			})
 		}
 	})
@@ -99,7 +99,7 @@ func TestPullRequests(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, resp.status, resp.body)
 	})
 
-	var created types.PullRequest
+	var first pullRequest
 	t.Run("create", func(t *testing.T) {
 		resp := alice.do(http.MethodPost, "/repos/alice/demo/pulls", map[string]any{
 			"title": "Add feature",
@@ -108,19 +108,42 @@ func TestPullRequests(t *testing.T) {
 			"base":  "master",
 		})
 		require.Equal(t, http.StatusCreated, resp.status, resp.body)
-		resp.decode(&created)
+		resp.decode(&first)
 
-		assert.Equal(t, int64(1), created.Index)
-		assert.Equal(t, "Add feature", created.Title)
-		assert.Equal(t, "Adds feature.txt.", created.Body)
-		assert.Equal(t, types.IssueStateOpen, created.State)
-		assert.Equal(t, "feature", created.HeadBranch)
-		assert.Equal(t, "master", created.BaseBranch)
-		assert.Equal(t, "alice/demo", created.HeadRepo.FullName)
-		assert.Equal(t, "alice/demo", created.BaseRepo.FullName)
-		assert.Equal(t, "alice", created.Poster.UserName)
-		assert.Equal(t, srv.url+"alice/demo/pulls/1", created.HTMLURL)
-		assert.False(t, created.HasMerged)
+		apiURL := srv.url + "api/v1/repos/alice/demo"
+		assert.Equal(t, apiURL+"/pulls/1", resp.header.Get("Location"))
+		assert.Equal(t, apiURL+"/pulls/1", first.URL)
+		assert.Equal(t, apiURL+"/issues/1", first.IssueURL)
+		assert.Equal(t, srv.url+"alice/demo/pulls/1", first.HTMLURL)
+		assert.Equal(t, int64(1), first.Number)
+		assert.Equal(t, "Add feature", first.Title)
+		assert.Equal(t, "Adds feature.txt.", first.Body)
+		assert.Equal(t, types.IssueStateOpen, first.State)
+		assert.Equal(t, "alice", first.User.UserName)
+		assert.NotNil(t, first.Assignees)
+		assert.False(t, first.Draft)
+		assert.False(t, first.Merged)
+		assert.Nil(t, first.ClosedAt)
+		assert.Nil(t, first.MergedAt)
+
+		require.NotNil(t, first.Head)
+		assert.Equal(t, "alice:feature", first.Head.Label)
+		assert.Equal(t, "feature", first.Head.Ref)
+		assert.Equal(t, revParse("feature"), first.Head.SHA)
+		assert.Equal(t, "alice", first.Head.User.UserName)
+		assert.Equal(t, "alice/demo", first.Head.Repo.FullName)
+
+		require.NotNil(t, first.Base)
+		assert.Equal(t, "alice:master", first.Base.Label)
+		assert.Equal(t, "master", first.Base.Ref)
+		assert.Equal(t, revParse("origin/master"), first.Base.SHA)
+		assert.Equal(t, "alice/demo", first.Base.Repo.FullName)
+
+		require.NotNil(t, first.Commits)
+		assert.Equal(t, int64(1), *first.Commits)
+		assert.Equal(t, 1, *first.Additions)
+		assert.Equal(t, 0, *first.Deletions)
+		assert.Equal(t, 1, *first.ChangedFiles)
 	})
 
 	t.Run("create rejects a duplicate", func(t *testing.T) {
@@ -129,15 +152,15 @@ func TestPullRequests(t *testing.T) {
 			"head":  "alice:feature",
 			"base":  "master",
 		})
-		assert.Equal(t, http.StatusUnprocessableEntity, resp.status, resp.body)
-		assert.Contains(t, resp.body, "already exists for these branches: #1")
+		resp.assertValidationFailed("head", "A pull request already exists for alice:feature (#1).")
 	})
 
 	t.Run("get", func(t *testing.T) {
-		var pr types.PullRequest
+		var pr pullRequest
 		bob.getJSON("/repos/alice/demo/pulls/1", &pr)
-		assert.Equal(t, created.ID, pr.ID)
+		assert.Equal(t, first.ID, pr.ID)
 		assert.Equal(t, "Add feature", pr.Title)
+		assert.NotNil(t, pr.Commits)
 
 		assert.Equal(t, http.StatusNotFound, bob.do(http.MethodGet, "/repos/alice/demo/pulls/99", nil).status)
 	})
@@ -151,13 +174,54 @@ func TestPullRequests(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, alice.do(http.MethodGet, fmt.Sprintf("/repos/alice/demo/pulls/%d", issue.Index), nil).status)
 	})
 
-	t.Run("list filters by state", func(t *testing.T) {
-		var open, closed []*types.PullRequest
-		bob.getJSON("/repos/alice/demo/pulls", &open)
-		bob.getJSON("/repos/alice/demo/pulls?state=closed", &closed)
-		require.Len(t, open, 1)
-		assert.Equal(t, created.ID, open[0].ID)
-		assert.Empty(t, closed)
+	// Make the creation times of the two pull requests differ for sorting.
+	time.Sleep(1100 * time.Millisecond)
+	var second pullRequest
+	resp = alice.do(http.MethodPost, "/repos/alice/demo/pulls", map[string]any{
+		"title": "Add second",
+		"head":  "second",
+		"base":  "master",
+	})
+	require.Equal(t, http.StatusCreated, resp.status, resp.body)
+	resp.decode(&second)
+
+	t.Run("list", func(t *testing.T) {
+		numbers := func(path string) []int64 {
+			var prs []*pullRequest
+			bob.getJSON(path, &prs)
+			numbers := make([]int64, len(prs))
+			for i, pr := range prs {
+				numbers[i] = pr.Number
+				assert.Nil(t, pr.Commits, "counts are only returned for a single pull request")
+			}
+			return numbers
+		}
+
+		assert.Equal(t, []int64{second.Number, 1}, numbers("/repos/alice/demo/pulls"))
+		assert.Equal(t, []int64{1, second.Number}, numbers("/repos/alice/demo/pulls?direction=asc"))
+		assert.Equal(t, []int64{1, second.Number}, numbers("/repos/alice/demo/pulls?sort=long-running"))
+		assert.Empty(t, numbers("/repos/alice/demo/pulls?state=closed"))
+		assert.Equal(t, []int64{second.Number}, numbers("/repos/alice/demo/pulls?head=alice:second"))
+		assert.Len(t, numbers("/repos/alice/demo/pulls?head=alice"), 2)
+		assert.Empty(t, numbers("/repos/alice/demo/pulls?head=bob:second"))
+		assert.Empty(t, numbers("/repos/alice/demo/pulls?head=nobody:second"))
+		assert.Len(t, numbers("/repos/alice/demo/pulls?base=master"), 2)
+		assert.Empty(t, numbers("/repos/alice/demo/pulls?base=same"))
+
+		resp := bob.do(http.MethodGet, "/repos/alice/demo/pulls?state=open&per_page=1", nil)
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var page []*pullRequest
+		resp.decode(&page)
+		assert.Len(t, page, 1)
+		link := resp.header.Get("Link")
+		assert.Contains(t, link, "page=2")
+		assert.Contains(t, link, "per_page=1")
+		assert.Contains(t, link, "state=open")
+		assert.Contains(t, link, `rel="next"`)
+
+		bob.do(http.MethodGet, "/repos/alice/demo/pulls?state=merged", nil).assertValidationFailed("state", "")
+		bob.do(http.MethodGet, "/repos/alice/demo/pulls?sort=size", nil).assertValidationFailed("sort", "")
+		bob.do(http.MethodGet, "/repos/alice/demo/pulls?direction=up", nil).assertValidationFailed("direction", "")
 	})
 
 	t.Run("edit", func(t *testing.T) {
@@ -166,37 +230,78 @@ func TestPullRequests(t *testing.T) {
 			"body":  "Edited body.",
 		})
 		require.Equal(t, http.StatusOK, resp.status, resp.body)
-		var pr types.PullRequest
+		var pr pullRequest
 		resp.decode(&pr)
 		assert.Equal(t, "Add feature.txt", pr.Title)
 		assert.Equal(t, "Edited body.", pr.Body)
 		assert.Equal(t, types.IssueStateOpen, pr.State)
 	})
 
-	t.Run("edit requires being the poster or a writer", func(t *testing.T) {
+	t.Run("edit requires being the author or a writer", func(t *testing.T) {
 		resp := bob.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{"title": "Hijacked"})
 		assert.Equal(t, http.StatusForbidden, resp.status, resp.body)
 	})
 
-	t.Run("edit rejects an unknown state", func(t *testing.T) {
-		resp := alice.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{
+	t.Run("edit rejects invalid fields without saving anything", func(t *testing.T) {
+		alice.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{
 			"title": "Should not be saved",
 			"state": "merged",
-		})
-		assert.Equal(t, http.StatusUnprocessableEntity, resp.status, resp.body)
+		}).assertValidationFailed("state", "")
+		alice.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{"title": " "}).
+			assertValidationFailed("title", "blank")
+		alice.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{
+			"title": "Should not be saved",
+			"base":  "nope",
+		}).assertValidationFailed("base", `Base branch "nope" does not exist`)
+		alice.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{"base": "feature"}).
+			assertValidationFailed("base", "must be different")
 
-		var pr types.PullRequest
+		var pr pullRequest
 		alice.getJSON("/repos/alice/demo/pulls/1", &pr)
 		assert.Equal(t, "Add feature.txt", pr.Title)
+		assert.Equal(t, "master", pr.Base.Ref)
 	})
 
-	t.Run("diff", func(t *testing.T) {
-		resp := bob.do(http.MethodGet, "/repos/alice/demo/pulls/1/diff", nil)
+	t.Run("edit changes the base branch", func(t *testing.T) {
+		path := fmt.Sprintf("/repos/alice/demo/pulls/%d", second.Number)
+		resp := alice.do(http.MethodPatch, path, map[string]any{"base": "same"})
 		require.Equal(t, http.StatusOK, resp.status, resp.body)
-		assert.Equal(t, "text/plain; charset=utf-8", resp.header.Get("Content-Type"))
-		assert.Contains(t, resp.body, "diff --git a/feature.txt b/feature.txt")
+		var pr pullRequest
+		resp.decode(&pr)
+		assert.Equal(t, "same", pr.Base.Ref)
+		assert.Equal(t, "alice:same", pr.Base.Label)
+		assert.Equal(t, revParse("same"), pr.Base.SHA)
+
+		var onSame []*pullRequest
+		alice.getJSON("/repos/alice/demo/pulls?base=same", &onSame)
+		require.Len(t, onSame, 1)
+		assert.Equal(t, second.Number, onSame[0].Number)
+
+		resp = alice.do(http.MethodPatch, path, map[string]any{"base": "master"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		resp.decode(&pr)
+		assert.Equal(t, "master", pr.Base.Ref)
+	})
+
+	t.Run("diff and patch media types", func(t *testing.T) {
+		resp := bob.doWithAccept(http.MethodGet, "/repos/alice/demo/pulls/1", "application/vnd.github.diff")
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		assert.Equal(t, "application/vnd.github.diff; charset=utf-8", resp.header.Get("Content-Type"))
+		assert.True(t, strings.HasPrefix(resp.body, "diff --git a/feature.txt b/feature.txt\n"), resp.body)
 		assert.Contains(t, resp.body, "+hello from feature")
 		assert.NotContains(t, resp.body, "README.md")
+
+		resp = bob.doWithAccept(http.MethodGet, "/repos/alice/demo/pulls/1", "application/vnd.github.v3.patch")
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		assert.Equal(t, "application/vnd.github.patch; charset=utf-8", resp.header.Get("Content-Type"))
+		assert.Contains(t, resp.body, "Subject: [PATCH] Update feature.txt on feature")
+		assert.Contains(t, resp.body, "+hello from feature")
+
+		resp = bob.doWithAccept(http.MethodGet, "/repos/alice/demo/pulls/1", "application/vnd.github+json")
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var pr pullRequest
+		resp.decode(&pr)
+		assert.Equal(t, int64(1), pr.Number)
 	})
 
 	t.Run("merge status before merging", func(t *testing.T) {
@@ -210,46 +315,57 @@ func TestPullRequests(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, resp.status, resp.body)
 	})
 
-	t.Run("merge rejects an unknown style", func(t *testing.T) {
-		resp := alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{"merge_style": "squash"})
-		assert.Equal(t, http.StatusUnprocessableEntity, resp.status, resp.body)
-	})
+	t.Run("merge rejects unsupported merge methods", func(t *testing.T) {
+		resp := alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{"merge_method": "squash"})
+		assert.Equal(t, http.StatusMethodNotAllowed, resp.status, resp.body)
+		assert.Contains(t, resp.body, "Squash merges are not allowed on this repository.")
 
-	t.Run("merge rejects rebasing when the repository does not allow it", func(t *testing.T) {
-		resp := alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{"merge_style": "rebase_before_merging"})
-		assert.Equal(t, http.StatusUnprocessableEntity, resp.status, resp.body)
+		resp = alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{"merge_method": "rebase"})
+		assert.Equal(t, http.StatusMethodNotAllowed, resp.status, resp.body)
+		assert.Contains(t, resp.body, "Rebase merges are not allowed on this repository.")
+
+		alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{"merge_method": "octopus"}).
+			assertValidationFailed("merge_method", "")
 	})
 
 	t.Run("merge rejects a stale head commit", func(t *testing.T) {
 		resp := alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{"sha": strings.Repeat("0", 40)})
 		assert.Equal(t, http.StatusConflict, resp.status, resp.body)
+		assert.Contains(t, resp.body, "Head branch was modified. Review and try the merge again.")
 	})
 
 	t.Run("merge", func(t *testing.T) {
-		headCommitID := strings.TrimSpace(srv.git(t, work, "rev-parse", "feature"))
 		resp := alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{
-			"sha":                headCommitID,
-			"commit_description": "Merged through the API.",
+			"sha":            revParse("feature"),
+			"merge_method":   "merge",
+			"commit_title":   "Ship feature.txt",
+			"commit_message": "Merged through the API.",
 		})
 		require.Equal(t, http.StatusOK, resp.status, resp.body)
-		var pr types.PullRequest
-		resp.decode(&pr)
-		assert.True(t, pr.HasMerged)
+		var result struct {
+			SHA     string `json:"sha"`
+			Merged  bool   `json:"merged"`
+			Message string `json:"message"`
+		}
+		resp.decode(&result)
+		assert.True(t, result.Merged)
+		assert.Equal(t, "Pull Request successfully merged", result.Message)
+
+		srv.git(t, work, "fetch", "-q", "origin")
+		assert.Equal(t, revParse("origin/master"), result.SHA)
+		assert.Equal(t, "Ship feature.txt\n\nMerged through the API.", strings.TrimSpace(srv.git(t, work, "log", "-1", "--format=%B", "origin/master")))
+		assert.Equal(t, "hello from feature\n", srv.git(t, work, "show", "origin/master:feature.txt"))
+
+		var pr pullRequest
+		alice.getJSON("/repos/alice/demo/pulls/1", &pr)
+		assert.True(t, pr.Merged)
 		assert.Equal(t, types.IssueStateClosed, pr.State)
 		require.NotNil(t, pr.MergedBy)
 		assert.Equal(t, "alice", pr.MergedBy.UserName)
-		require.NotNil(t, pr.MergedCommitID)
-		assert.Equal(t, headCommitID, *pr.MergedCommitID)
-		assert.NotNil(t, pr.Merged)
-
-		raw := alice.do(http.MethodGet, "/repos/alice/demo/raw/master/feature.txt", nil)
-		require.Equal(t, http.StatusOK, raw.status, raw.body)
-		assert.Equal(t, "hello from feature\n", raw.body)
-
-		srv.git(t, work, "fetch", "-q", "origin")
-		message := srv.git(t, work, "log", "-1", "--format=%B", "origin/master")
-		assert.Contains(t, message, "Merge branch 'feature' of alice/demo into master")
-		assert.Contains(t, message, "Merged through the API.")
+		assert.NotNil(t, pr.MergedAt)
+		assert.Equal(t, pr.MergedAt, pr.ClosedAt)
+		assert.Nil(t, pr.Mergeable)
+		assert.Equal(t, "unknown", pr.MergeableState)
 	})
 
 	t.Run("merge status after merging", func(t *testing.T) {
@@ -259,46 +375,44 @@ func TestPullRequests(t *testing.T) {
 	t.Run("merge rejects an already merged pull request", func(t *testing.T) {
 		resp := alice.do(http.MethodPut, "/repos/alice/demo/pulls/1/merge", map[string]any{})
 		assert.Equal(t, http.StatusMethodNotAllowed, resp.status, resp.body)
+		assert.Contains(t, resp.body, "Pull Request is not mergeable")
 	})
 
 	t.Run("edit cannot reopen a merged pull request", func(t *testing.T) {
-		resp := alice.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{"state": "open"})
-		assert.Equal(t, http.StatusUnprocessableEntity, resp.status, resp.body)
+		alice.do(http.MethodPatch, "/repos/alice/demo/pulls/1", map[string]any{"state": "open"}).
+			assertValidationFailed("state", "cannot be reopened")
 	})
 
-	t.Run("list shows merged pull requests as closed", func(t *testing.T) {
-		var open, closed []*types.PullRequest
-		alice.getJSON("/repos/alice/demo/pulls", &open)
+	t.Run("list by state after merging", func(t *testing.T) {
+		var closed, all []*pullRequest
 		alice.getJSON("/repos/alice/demo/pulls?state=closed", &closed)
-		assert.Empty(t, open)
+		alice.getJSON("/repos/alice/demo/pulls?state=all", &all)
 		require.Len(t, closed, 1)
-		assert.True(t, closed[0].HasMerged)
+		assert.True(t, closed[0].Merged)
+		assert.Len(t, all, 2)
 	})
 
 	t.Run("close and reopen", func(t *testing.T) {
-		resp := alice.do(http.MethodPost, "/repos/alice/demo/pulls", map[string]any{
-			"title": "Add second",
-			"head":  "second",
-			"base":  "master",
-		})
-		require.Equal(t, http.StatusCreated, resp.status, resp.body)
-		var pr types.PullRequest
-		resp.decode(&pr)
-		path := fmt.Sprintf("/repos/alice/demo/pulls/%d", pr.Index)
-
-		resp = alice.do(http.MethodPatch, path, map[string]any{"state": "closed"})
+		path := fmt.Sprintf("/repos/alice/demo/pulls/%d", second.Number)
+		resp := alice.do(http.MethodPatch, path, map[string]any{"state": "closed"})
 		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var pr pullRequest
 		resp.decode(&pr)
 		assert.Equal(t, types.IssueStateClosed, pr.State)
-		assert.False(t, pr.HasMerged)
+		assert.False(t, pr.Merged)
+		assert.NotNil(t, pr.ClosedAt)
 
 		resp = alice.do(http.MethodPut, path+"/merge", map[string]any{})
 		assert.Equal(t, http.StatusMethodNotAllowed, resp.status, resp.body)
+
+		alice.do(http.MethodPatch, path, map[string]any{"base": "same"}).
+			assertValidationFailed("base", "closed pull request")
 
 		resp = alice.do(http.MethodPatch, path, map[string]any{"state": "open"})
 		require.Equal(t, http.StatusOK, resp.status, resp.body)
 		resp.decode(&pr)
 		assert.Equal(t, types.IssueStateOpen, pr.State)
+		assert.Nil(t, pr.ClosedAt)
 	})
 
 	t.Run("merge rejects a conflicting pull request", func(t *testing.T) {
@@ -308,15 +422,17 @@ func TestPullRequests(t *testing.T) {
 			"base":  "master",
 		})
 		require.Equal(t, http.StatusCreated, resp.status, resp.body)
-		var pr types.PullRequest
+		var pr pullRequest
 		resp.decode(&pr)
 
-		alice.waitForMergeable(t, pr.Index, false)
-		resp = alice.do(http.MethodPut, fmt.Sprintf("/repos/alice/demo/pulls/%d/merge", pr.Index), map[string]any{})
+		alice.waitForMergeable(t, pr.Number, false)
+		alice.getJSON(fmt.Sprintf("/repos/alice/demo/pulls/%d", pr.Number), &pr)
+		assert.Equal(t, "dirty", pr.MergeableState)
+
+		resp = alice.do(http.MethodPut, fmt.Sprintf("/repos/alice/demo/pulls/%d/merge", pr.Number), map[string]any{})
 		assert.Equal(t, http.StatusMethodNotAllowed, resp.status, resp.body)
 		assert.Contains(t, resp.body, "conflicts")
 	})
-
 }
 
 type testServer struct {
@@ -513,7 +629,37 @@ func (r *apiResponse) decode(v any) {
 	require.NoError(r.t, json.Unmarshal([]byte(r.body), v), r.body)
 }
 
+// assertValidationFailed asserts a GitHub-style 422 response for the field,
+// whose message contains the given text.
+func (r *apiResponse) assertValidationFailed(field, message string) {
+	r.t.Helper()
+
+	require.Equal(r.t, http.StatusUnprocessableEntity, r.status, r.body)
+	var body struct {
+		Message string `json:"message"`
+		Errors  []struct {
+			Field   string `json:"field"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	r.decode(&body)
+	assert.Equal(r.t, "Validation Failed", body.Message)
+	require.Len(r.t, body.Errors, 1, r.body)
+	assert.Equal(r.t, field, body.Errors[0].Field)
+	assert.Contains(r.t, body.Errors[0].Message, message)
+}
+
 func (c *apiClient) do(method, path string, body any) *apiResponse {
+	c.t.Helper()
+	return c.request(method, path, body, "")
+}
+
+func (c *apiClient) doWithAccept(method, path, accept string) *apiResponse {
+	c.t.Helper()
+	return c.request(method, path, nil, accept)
+}
+
+func (c *apiClient) request(method, path string, body any, accept string) *apiResponse {
 	c.t.Helper()
 
 	var reader io.Reader
@@ -527,6 +673,9 @@ func (c *apiClient) do(method, path string, body any) *apiResponse {
 	req.Header.Set("Authorization", "token "+c.token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -552,7 +701,7 @@ func (c *apiClient) waitForMergeable(t *testing.T, index int64, want bool) {
 
 	require.Eventually(t, func() bool {
 		resp := c.do(http.MethodGet, fmt.Sprintf("/repos/alice/demo/pulls/%d", index), nil)
-		var pr types.PullRequest
+		var pr pullRequest
 		if resp.status != http.StatusOK || json.Unmarshal([]byte(resp.body), &pr) != nil {
 			return false
 		}

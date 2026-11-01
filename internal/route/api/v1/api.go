@@ -347,8 +347,7 @@ func RegisterRoutes(m *macaron.Macaron) {
 					m.Group("/:index", func() {
 						m.Combo("").
 							Get(getPullRequest).
-							Patch(bind(editIssueRequest{}), editPullRequest)
-						m.Get("/diff", getPullRequestDiff)
+							Patch(bind(editPullRequestRequest{}), editPullRequest)
 						m.Combo("/merge").
 							Get(isPullRequestMerged).
 							Put(reqRepoWriter(), bind(mergePullRequestRequest{}), mergePullRequest)
